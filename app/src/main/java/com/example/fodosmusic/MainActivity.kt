@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -20,11 +21,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
@@ -36,6 +41,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -58,6 +65,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.materials.HazeMaterials
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,12 +79,22 @@ class MainActivity : ComponentActivity() {
 }
 
 enum class LibraryTab(val label: String) {
-    SONGS("Songs"), ARTISTS("Artists"), ALBUMS("Albums"), PLAYLISTS("Playlists")
+    SONGS("Songs"), ARTISTS("Artists"), ALBUMS("Albums"), FAVORITES("Favorites")
 }
 
+enum class SortOption(val label: String) {
+    DEFAULT("Default"),
+    TITLE_ASC("Title (A-Z)"),
+    TITLE_DESC("Title (Z-A)"),
+    ARTIST_ASC("Artist (A-Z)"),
+    ARTIST_DESC("Artist (Z-A)")
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MusicPlayerApp() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val playerViewModel: PlayerViewModel = viewModel()
     val hazeState = remember { HazeState() }
 
@@ -86,18 +104,46 @@ fun MusicPlayerApp() {
     var backdropArt by remember { mutableStateOf<Bitmap?>(null) }
     var selectedTab by remember { mutableStateOf(LibraryTab.SONGS) }
 
+    // Loading state buat preload album art sebelum list ditampilin
+    var isPreloading by remember { mutableStateOf(false) }
+    var preloadProgress by remember { mutableStateOf(0 to 0) }
+
+    // Archive state, dipersist lewat SharedPreferences
+    var archivedIds by remember { mutableStateOf(getArchivedSongIds(context)) }
+    var showArchived by remember { mutableStateOf(false) }
+
+    // Search state
+    var isSearchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+
+    // Sort state
+    var sortOption by remember { mutableStateOf(SortOption.DEFAULT) }
+
     val permission = if (Build.VERSION.SDK_INT >= 33)
         Manifest.permission.READ_MEDIA_AUDIO
     else
         Manifest.permission.READ_EXTERNAL_STORAGE
+
+    fun startPreload(list: List<Song>) {
+        scope.launch {
+            isPreloading = true
+            preloadProgress = 0 to list.size
+            preloadAlbumArt(context, list) { done, total ->
+                preloadProgress = done to total
+            }
+            isPreloading = false
+        }
+    }
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasPermission = granted
         if (granted) {
-            songs = getAllAudioFiles(context)
-            playerViewModel.setSongList(songs)
+            val loaded = getAllAudioFiles(context)
+            songs = loaded
+            playerViewModel.setSongList(loaded)
+            startPreload(loaded)
         }
     }
 
@@ -114,62 +160,124 @@ fun MusicPlayerApp() {
         BackHandler { isFullScreen = false }
     }
 
+    fun archiveSong(id: Long) {
+        val updated = archivedIds + id
+        archivedIds = updated
+        saveArchivedSongIds(context, updated)
+    }
+
+    fun unarchiveSong(id: Long) {
+        val updated = archivedIds - id
+        archivedIds = updated
+        saveArchivedSongIds(context, updated)
+    }
+
+    val displayedSongs = remember(songs, archivedIds, showArchived, searchQuery, sortOption) {
+        var list = songs.filter { song ->
+            if (showArchived) archivedIds.contains(song.id) else !archivedIds.contains(song.id)
+        }
+        if (searchQuery.isNotBlank()) {
+            list = list.filter {
+                it.title.contains(searchQuery, ignoreCase = true) ||
+                        it.artist.contains(searchQuery, ignoreCase = true)
+            }
+        }
+        when (sortOption) {
+            SortOption.DEFAULT -> list
+            SortOption.TITLE_ASC -> list.sortedBy { it.title.lowercase() }
+            SortOption.TITLE_DESC -> list.sortedByDescending { it.title.lowercase() }
+            SortOption.ARTIST_ASC -> list.sortedBy { it.artist.lowercase() }
+            SortOption.ARTIST_DESC -> list.sortedByDescending { it.artist.lowercase() }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.fillMaxSize()) {
             AlbumArtBackdrop(albumArt = backdropArt)
 
             Box(modifier = Modifier.fillMaxSize()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .hazeSource(state = hazeState)
-                ) {
-                    LibraryHeader()
+                if (hasPermission && isPreloading) {
+                    LoadingScreen(progress = preloadProgress)
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .hazeSource(state = hazeState)
+                    ) {
+                        LibraryHeader(
+                            isSearchActive = isSearchActive,
+                            searchQuery = searchQuery,
+                            onSearchQueryChange = { searchQuery = it },
+                            onSearchToggle = {
+                                isSearchActive = !isSearchActive
+                                if (!isSearchActive) searchQuery = ""
+                            },
+                            showArchived = showArchived,
+                            onToggleShowArchived = { showArchived = !showArchived }
+                        )
 
-                    LibraryTabRow(
-                        selectedTab = selectedTab,
-                        onTabSelected = { selectedTab = it }
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    if (!hasPermission) {
-                        Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                            Text("Izin akses musik belum diberikan.", color = TextPrimary)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            LibraryTabRow(
+                                selectedTab = selectedTab,
+                                onTabSelected = { selectedTab = it },
+                                modifier = Modifier.weight(1f)
+                            )
+                            SortMenuButton(
+                                currentSort = sortOption,
+                                onSortSelected = { sortOption = it }
+                            )
                         }
-                    } else {
-                        when (selectedTab) {
-                            LibraryTab.SONGS -> {
-                                LazyColumn(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentPadding = PaddingValues(
-                                        start = 16.dp,
-                                        end = 16.dp,
-                                        top = 0.dp,
-                                        bottom = 180.dp
-                                    )
-                                ) {
-                                    items(songs) { song ->
-                                        GlassCard(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                                            Row(
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        if (!hasPermission) {
+                            Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                                Text("Izin akses musik belum diberikan.", color = TextPrimary)
+                            }
+                        } else {
+                            when (selectedTab) {
+                                LibraryTab.SONGS -> {
+                                    if (showArchived) {
+                                        Text(
+                                            "Archived Audio",
+                                            color = TextSecondary,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentPadding = PaddingValues(
+                                            start = 16.dp,
+                                            end = 16.dp,
+                                            top = 0.dp,
+                                            bottom = 180.dp
+                                        )
+                                    ) {
+                                        items(displayedSongs, key = { it.id }) { song ->
+                                            SongRow(
+                                                song = song,
+                                                isArchived = showArchived,
+                                                onClick = { playerViewModel.playSong(song) },
+                                                onArchive = { archiveSong(song.id) },
+                                                onUnarchive = { unarchiveSong(song.id) },
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .clickableSong { playerViewModel.playSong(song) },
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                SongThumbnail(song = song)
-                                                Spacer(modifier = Modifier.width(12.dp))
-                                                Column {
-                                                    Text(song.title, color = TextPrimary)
-                                                    Text(song.artist, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-                                                }
-                                            }
+                                                    .padding(bottom = 8.dp)
+                                            )
                                         }
                                     }
                                 }
-                            }
-                            else -> {
-                                DummyTabContent(tabLabel = selectedTab.label)
+                                else -> {
+                                    DummyTabContent(tabLabel = selectedTab.label)
+                                }
                             }
                         }
                     }
@@ -216,65 +324,189 @@ fun MusicPlayerApp() {
 }
 
 @Composable
-fun LibraryHeader() {
-    Row(
+fun LoadingScreen(progress: Pair<Int, Int>) {
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+            .fillMaxSize()
+            .statusBarsPadding(),
+        contentAlignment = Alignment.Center
     ) {
-        Column {
-            Text(
-                "Fodo's Music",
-                color = TextPrimary,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                "YOUR SOUNDTRACK",
-                color = TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 2.sp
-            )
-        }
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { /* dummy: search belum diimplementasi */ }) {
-                Icon(Icons.Filled.Search, contentDescription = "Search", tint = TextPrimary)
-            }
-            IconButton(onClick = { /* dummy: menu belum diimplementasi */ }) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "More", tint = TextPrimary)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(color = TextPrimary)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Loading your library...", color = TextPrimary)
+            if (progress.second > 0) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "${progress.first}/${progress.second}",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
     }
 }
 
 @Composable
-fun LibraryTabRow(selectedTab: LibraryTab, onTabSelected: (LibraryTab) -> Unit) {
+fun LibraryHeader(
+    isSearchActive: Boolean,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    onSearchToggle: () -> Unit,
+    showArchived: Boolean,
+    onToggleShowArchived: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        LibraryTab.entries.forEach { tab ->
-            val isSelected = tab == selectedTab
-            Box(
+        if (isSearchActive) {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                placeholder = { Text("Search title or artist", color = TextSecondary) },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = Color.White.copy(alpha = 0.4f),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
+                    cursorColor = TextPrimary
+                ),
+                trailingIcon = {
+                    IconButton(onClick = onSearchToggle) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close search", tint = TextPrimary)
+                    }
+                },
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(
-                        if (isSelected) Color.White.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.08f)
-                    )
-                    .clickable { onTabSelected(tab) }
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
+                    .weight(1f)
+                    .padding(end = 4.dp)
+            )
+        } else {
+            Column {
                 Text(
-                    tab.label,
-                    color = if (isSelected) Color.Black else TextSecondary,
-                    fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                    "Fodo's Music",
+                    color = TextPrimary,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "YOUR SOUNDTRACK",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 2.sp
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onSearchToggle) {
+                    Icon(Icons.Filled.Search, contentDescription = "Search", tint = TextPrimary)
+                }
+                Box {
+                    var menuExpanded by remember { mutableStateOf(false) }
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More", tint = TextPrimary)
+                    }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text(if (showArchived) "Show All Audio" else "Show Archived Audio") },
+                            onClick = {
+                                onToggleShowArchived()
+                                menuExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LibraryTabRow(
+    selectedTab: LibraryTab,
+    onTabSelected: (LibraryTab) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tabs = LibraryTab.entries
+    BoxWithConstraints(
+        modifier = modifier
+            .height(40.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color.White.copy(alpha = 0.08f))
+    ) {
+        val segmentWidth = maxWidth / tabs.size
+        val selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
+        val offset by animateDpAsState(targetValue = segmentWidth * selectedIndex, label = "tabIndicator")
+
+        Box(
+            modifier = Modifier
+                .offset(x = offset)
+                .width(segmentWidth)
+                .fillMaxHeight()
+                .padding(3.dp)
+                .clip(RoundedCornerShape(17.dp))
+                .background(Color.White.copy(alpha = 0.9f))
+        )
+
+        Row(modifier = Modifier.fillMaxSize()) {
+            tabs.forEach { tab ->
+                val isSelected = tab == selectedTab
+                Box(
+                    modifier = Modifier
+                        .width(segmentWidth)
+                        .fillMaxHeight()
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() }
+                        ) { onTabSelected(tab) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        tab.label,
+                        color = if (isSelected) Color.Black else TextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SortMenuButton(currentSort: SortOption, onSortSelected: (SortOption) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { expanded = true },
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color.White.copy(alpha = 0.08f))
+        ) {
+            Icon(Icons.Filled.Sort, contentDescription = "Sort", tint = TextPrimary)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            SortOption.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    leadingIcon = {
+                        if (option == currentSort) {
+                            Icon(Icons.Filled.Check, contentDescription = null)
+                        }
+                    },
+                    onClick = {
+                        onSortSelected(option)
+                        expanded = false
+                    }
                 )
             }
         }
@@ -359,6 +591,73 @@ fun SongThumbnail(song: Song, size: androidx.compose.ui.unit.Dp = 48.dp) {
                 tint = TextSecondary,
                 modifier = Modifier.size(size / 2)
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SongRow(
+    song: Song,
+    isArchived: Boolean,
+    onClick: () -> Unit,
+    onArchive: () -> Unit,
+    onUnarchive: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                if (isArchived) onUnarchive() else onArchive()
+                true
+            } else {
+                false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        modifier = modifier,
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = true,
+        backgroundContent = {
+            // Cuma tampilin background merah kalau lagi bener-bener di-swipe.
+            // Tanpa ini, background-nya nembus keliatan terus karena GlassCard
+            // di atasnya translucent (bukan solid), jadi merahnya kelihatan
+            // walaupun lagi diem/ga di-swipe sama sekali.
+            if (dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFFB33A3A))
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Icon(
+                        imageVector = if (isArchived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                        contentDescription = if (isArchived) "Unarchive" else "Archive",
+                        tint = Color.White
+                    )
+                }
+            }
+        }
+    ) {
+        GlassCard(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickableSong(onClick),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SongThumbnail(song = song)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(song.title, color = TextPrimary)
+                    Text(song.artist, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                }
+            }
         }
     }
 }

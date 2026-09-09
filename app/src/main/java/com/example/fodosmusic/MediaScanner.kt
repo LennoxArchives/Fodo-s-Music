@@ -157,3 +157,20 @@ suspend fun preloadAlbumArt(
         }
     }
 }
+
+// ---- Archive status persistence ----
+// Disimpen di SharedPreferences biar status archive-nya nggak reset tiap buka app.
+
+private const val PREFS_NAME = "fodos_music_prefs"
+private const val KEY_ARCHIVED_IDS = "archived_song_ids"
+
+fun getArchivedSongIds(context: Context): Set<Long> {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val stored = prefs.getStringSet(KEY_ARCHIVED_IDS, emptySet()) ?: emptySet()
+    return stored.mapNotNull { it.toLongOrNull() }.toSet()
+}
+
+fun saveArchivedSongIds(context: Context, ids: Set<Long>) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit().putStringSet(KEY_ARCHIVED_IDS, ids.map { it.toString() }.toSet()).apply()
+}
