@@ -511,41 +511,21 @@ fun FullScreenPlayer(
     var showPlaylistSheet by remember { mutableStateOf(false) }
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {
-                var accumulatedDrag = 0f
-                detectVerticalDragGestures(
-                    onDragStart = { accumulatedDrag = 0f },
-                    onVerticalDrag = { change, dragAmount ->
-                        change.consume()
-                        accumulatedDrag += dragAmount
-                        if (accumulatedDrag > 80f) {
-                            onSwipeDown()
-                        }
-                    }
-                )
-            }
+        modifier = Modifier.fillMaxSize()
     ) {
         AlbumArtBackdrop(albumArt = backdropArt)
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Box(
-                modifier = Modifier
-                    .width(40.dp)
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(TextSecondary)
-            )
-
-            Spacer(modifier = Modifier.height(28.dp))
+            // Ruang kosong di atas buat handle drag yang sekarang dipisah (lihat di bawah),
+            // biar konten nggak ketiban dia.
+            Spacer(modifier = Modifier.height(24.dp))
 
             VinylDisc(
                 albumArt = backdropArt,
@@ -645,7 +625,8 @@ fun FullScreenPlayer(
                             width = 1.dp,
                             color = Color.White.copy(alpha = 0.14f),
                             shape = RoundedCornerShape(24.dp)
-                        )
+                        ),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
                         modifier = Modifier
@@ -714,6 +695,40 @@ fun FullScreenPlayer(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        // Handle drag buat nutup layar ini, sengaja dipisah dari Column di atas (yang sekarang
+        // bisa di-scroll) supaya gesture-nya nggak ke-"makan" duluan sama scroll. Area sentuhnya
+        // dilebarin biar gampang di-drag, bukan cuma pas di garis kecilnya doang.
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .fillMaxWidth()
+                .height(48.dp)
+                .pointerInput(Unit) {
+                    var accumulatedDrag = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { accumulatedDrag = 0f },
+                        onVerticalDrag = { change, dragAmount ->
+                            change.consume()
+                            accumulatedDrag += dragAmount
+                            if (accumulatedDrag > 80f) {
+                                onSwipeDown()
+                            }
+                        }
+                    )
+                },
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .width(40.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(TextSecondary)
+            )
         }
     }
 
