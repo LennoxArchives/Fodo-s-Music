@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -21,6 +22,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -57,7 +60,10 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -80,7 +86,7 @@ class MainActivity : ComponentActivity() {
 }
 
 enum class LibraryTab(val label: String) {
-    SONGS("Songs"), ARTISTS("Artists"), ALBUMS("Albums"), PLAYLISTS("Playlists")
+    SONGS("Songs"), ARTISTS("Artists"), ALBUMS("Albums"), LIKED("Liked")
 }
 
 @Composable
@@ -132,6 +138,7 @@ fun MusicPlayerApp() {
                     modifier = Modifier
                         .fillMaxSize()
                         .hazeSource(state = hazeState)
+                        .statusBarsPadding()
                 ) {
                     LibraryHeader()
 
@@ -229,7 +236,7 @@ fun LibraryHeader() {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 4.dp),
+            .padding(start = 20.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -262,29 +269,69 @@ fun LibraryHeader() {
 
 @Composable
 fun LibraryTabRow(selectedTab: LibraryTab, onTabSelected: (LibraryTab) -> Unit) {
-    Row(
+    val density = LocalDensity.current
+    val tabCount = LibraryTab.entries.size
+
+    var tabWidths by remember { mutableStateOf(List(tabCount) { 0.dp }) }
+    var tabOffsets by remember { mutableStateOf(List(tabCount) { 0.dp }) }
+
+    val selectedIndex = LibraryTab.entries.indexOf(selectedTab)
+
+    val animatedOffset by animateDpAsState(
+        targetValue = tabOffsets.getOrElse(selectedIndex) { 0.dp },
+        animationSpec = tween(durationMillis = 280),
+        label = "pillOffset"
+    )
+    val animatedWidth by animateDpAsState(
+        targetValue = tabWidths.getOrElse(selectedIndex) { 0.dp },
+        animationSpec = tween(durationMillis = 280),
+        label = "pillWidth"
+    )
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        LibraryTab.entries.forEach { tab ->
-            val isSelected = tab == selectedTab
+        // Pill highlight yang geser
+        if (animatedWidth > 0.dp) {
             Box(
                 modifier = Modifier
+                    .offset(x = animatedOffset)
+                    .height(36.dp)
+                    .width(animatedWidth)
                     .clip(RoundedCornerShape(20.dp))
-                    .background(
-                        if (isSelected) Color.White.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.08f)
+                    .background(Color.White.copy(alpha = 0.9f))
+            )
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LibraryTab.entries.forEachIndexed { index, tab ->
+                val isSelected = tab == selectedTab
+                Box(
+                    modifier = Modifier
+                        .onGloballyPositioned { coordinates ->
+                            val widthDp = with(density) { coordinates.size.width.toDp() }
+                            val offsetXDp = with(density) { coordinates.positionInParent().x.toDp() }
+                            if (tabWidths.getOrNull(index) != widthDp) {
+                                tabWidths = tabWidths.toMutableList().also { it[index] = widthDp }
+                            }
+                            if (tabOffsets.getOrNull(index) != offsetXDp) {
+                                tabOffsets = tabOffsets.toMutableList().also { it[index] = offsetXDp }
+                            }
+                        }
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onTabSelected(tab) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        tab.label,
+                        color = if (isSelected) Color.Black else TextSecondary,
+                        fontSize = 13.sp,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                     )
-                    .clickable { onTabSelected(tab) }
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    tab.label,
-                    color = if (isSelected) Color.Black else TextSecondary,
-                    fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                )
+                }
             }
         }
     }
