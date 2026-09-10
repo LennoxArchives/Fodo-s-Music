@@ -4,6 +4,8 @@ import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.MediaStore
@@ -12,13 +14,27 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 data class Song(
     val id: Long,
     val title: String,
     val artist: String,
+    val album: String,
+    val year: Int,
     val duration: Long,
     val uri: Uri
+)
+
+/**
+ * Info teknis audio yang dibaca langsung dari container file-nya (bukan tebakan).
+ * Nilai 0 / "Unknown" berarti info itu tidak tersedia di file tersebut.
+ */
+data class AudioTechInfo(
+    val formatLabel: String,
+    val sampleRateHz: Int,
+    val bitDepth: Int,
+    val bitrateKbps: Int
 )
 
 fun getAllAudioFiles(context: Context): List<Song> {
@@ -28,6 +44,8 @@ fun getAllAudioFiles(context: Context): List<Song> {
         MediaStore.Audio.Media._ID,
         MediaStore.Audio.Media.TITLE,
         MediaStore.Audio.Media.ARTIST,
+        MediaStore.Audio.Media.ALBUM,
+        MediaStore.Audio.Media.YEAR,
         MediaStore.Audio.Media.DURATION
     )
     val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
@@ -36,6 +54,8 @@ fun getAllAudioFiles(context: Context): List<Song> {
         val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
         val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
         val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+        val albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+        val yearCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.YEAR)
         val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
 
         while (cursor.moveToNext()) {
@@ -46,6 +66,8 @@ fun getAllAudioFiles(context: Context): List<Song> {
                     id = id,
                     title = cursor.getString(titleCol) ?: "Unknown",
                     artist = cursor.getString(artistCol) ?: "Unknown Artist",
+                    album = cursor.getString(albumCol) ?: "Unknown Album",
+                    year = cursor.getInt(yearCol),
                     duration = cursor.getLong(durationCol),
                     uri = uri
                 )
@@ -55,7 +77,7 @@ fun getAllAudioFiles(context: Context): List<Song> {
     return songs
 }
 
-// Cache tingkat 1: memori (paling cepat, tapi hilang kalau app di-kill)
+// ---- Cache album art (logika sama seperti sebelumnya) ----
 private val albumArtCache = LruCache<Long, Bitmap>(300)
 private val noArtCache = mutableSetOf<Long>()
 
@@ -158,19 +180,77 @@ suspend fun preloadAlbumArt(
     }
 }
 
-// ---- Archive status persistence ----
-// Disimpen di SharedPreferences biar status archive-nya nggak reset tiap buka app.
+/**
+ * Baca info teknis audio (format, sample rate, bit depth perkiraan, bitrate) langsung
+ * dari container file-nya pakai MediaExtractor. Wajib dipanggil dari coroutine (suspend),
+ * karena baca file bisa agak lambat kalau storage-nya lelet.
+ */
+suspend fun getAudioTechInfo(context: Context, uri: Uri): AudioTechInfo = withContext(Dispatchers.IO) {
+    val extractor = MediaExtractor()
+    try {
+        extractor.setDataSource(context, uri, null)
 
-private const val PREFS_NAME = "fodos_music_prefs"
-private const val KEY_ARCHIVED_IDS = "archived_song_ids"
+        var format: MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val f = extractor.getTrackFormat(i)
+            val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
+            if (mime.startsWith("audio/")) {
+                format = f
+                break
+            }
+        }
 
-fun getArchivedSongIds(context: Context): Set<Long> {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    val stored = prefs.getStringSet(KEY_ARCHIVED_IDS, emptySet()) ?: emptySet()
-    return stored.mapNotNull { it.toLongOrNull() }.toSet()
+        if (format == null) return@withContext AudioTechInfo("Unknown", 0, 0, 0)
+
+        val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+        val formatLabel = mimeToLabel(mime)
+
+        val sampleRate = if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+            format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        } else 0
+
+        // "bits-per-sample" cuma keisi platform buat format lossless (FLAC/WAV) di device yg cukup baru.
+        // Kalau nggak ada, kita asumsikan 16-bit standar CD buat lossless, dan 0 (n/a) buat format lossy.
+        val bitDepth = when {
+            format.containsKey("bits-per-sample") -> format.getInteger("bits-per-sample")
+            mime.contains("flac") || mime.contains("raw") -> 16
+            else -> 0
+        }
+
+        val bitrate = if (format.containsKey(MediaFormat.KEY_BIT_RATE)) {
+            format.getInteger(MediaFormat.KEY_BIT_RATE) / 1000
+        } else 0
+
+        AudioTechInfo(formatLabel, sampleRate, bitDepth, bitrate)
+    } catch (e: Exception) {
+        AudioTechInfo("Unknown", 0, 0, 0)
+    } finally {
+        extractor.release()
+    }
 }
 
-fun saveArchivedSongIds(context: Context, ids: Set<Long>) {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    prefs.edit().putStringSet(KEY_ARCHIVED_IDS, ids.map { it.toString() }.toSet()).apply()
+private fun mimeToLabel(mime: String): String = when {
+    mime.contains("flac") -> "FLAC"
+    mime.contains("mpeg") -> "MP3"
+    mime.contains("aac") -> "AAC"
+    mime.contains("opus") -> "Opus"
+    mime.contains("vorbis") -> "OGG Vorbis"
+    mime.contains("wav") || mime.contains("raw") -> "WAV"
+    mime.contains("alac") -> "ALAC"
+    else -> mime.substringAfter("/").uppercase(Locale.ROOT).ifBlank { "Unknown" }
+}
+
+// ---- Favorit lagu (persist simpel pakai SharedPreferences) ----
+private const val FAVORITES_PREFS = "fodos_music_favorites"
+private const val FAVORITES_KEY = "favorite_ids"
+
+fun loadFavoriteIds(context: Context): Set<Long> {
+    val prefs = context.getSharedPreferences(FAVORITES_PREFS, Context.MODE_PRIVATE)
+    val raw = prefs.getStringSet(FAVORITES_KEY, emptySet()) ?: emptySet()
+    return raw.mapNotNull { it.toLongOrNull() }.toSet()
+}
+
+fun saveFavoriteIds(context: Context, ids: Set<Long>) {
+    val prefs = context.getSharedPreferences(FAVORITES_PREFS, Context.MODE_PRIVATE)
+    prefs.edit().putStringSet(FAVORITES_KEY, ids.map { it.toString() }.toSet()).apply()
 }
